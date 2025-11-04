@@ -17,17 +17,17 @@ DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1435043389669376061/VOvG
 # الصفحات المراقبة
 SOURCES = {
     "facebook": {
-        "url": "https://www.facebook.com/csgocasescom/",  # RSS للفيسبوك
+        "url": "https://www.facebook.com/ahmed.ali.240509/",  # RSS للفيسبوك
         "interval": 15 * 60,  # 15 دقيقة
         "last_post": None,
     },
     "instagram": {
-        "url": "https://www.instagram.com/csgocasescom/",
+        "url": "https://www.instagram.com/ahmed_ali_hassan121/",
         "interval": 30 * 60,
         "last_post": None,
     },
     "x": {
-        "url": "https://x.com/csgocasescom",
+        "url": "https://x.com/ForspeedXf",
         "interval": 20 * 60,
         "last_post": None,
     },
