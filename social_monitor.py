@@ -17,7 +17,7 @@ DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1435043389669376061/VOvG
 # الصفحات المراقبة
 SOURCES = {
     "facebook": {
-        "url": "https://rss.app/feeds/g9tpSfll19QEJgAR.xml",  # RSS للفيسبوك
+        "url": "https://www.facebook.com/csgocasescom/",  # RSS للفيسبوك
         "interval": 15 * 60,  # 15 دقيقة
         "last_post": None,
     },
