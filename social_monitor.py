@@ -49,9 +49,85 @@ def fetch_html(url: str, timeout: int = 20):
         logging.exception(f"Failed to fetch {url}")
         return None
 
-# ---------------- Extractors (مثل الكود الأصلي) ----------------
-# ضع هنا كل دوال extract_latest_from_facebook، instagram، x
-# مع EXTRACTORS و detect_latest كما في سكربتك الأصلي
+# ---------------- Extractors ----------------
+
+def extract_latest_from_facebook(html: str, base_url: str):
+    soup = BeautifulSoup(html, "html.parser")
+    og_url = soup.find("meta", property="og:url")
+    if og_url and og_url.get("content"):
+        return og_url["content"], (soup.find("meta", property="og:description").get("content") if soup.find("meta", property="og:description") else None)
+    m = re.search(r"(/[^\s'\"]+/posts/\d+)", html)
+    if m:
+        url = requests.compat.urljoin(base_url, m.group(1))
+        return url, None
+    m = re.search(r"story_fbid=([0-9]+)", html)
+    if m:
+        url = f"{base_url.rstrip('/')}/posts/{m.group(1)}"
+        return url, None
+    return base_url, (soup.title.string if soup.title else None)
+
+def extract_latest_from_instagram(html: str, base_url: str):
+    soup = BeautifulSoup(html, "html.parser")
+    og = soup.find("meta", property="og:url")
+    if og and og.get("content"):
+        return og["content"], (soup.find("meta", property="og:description").get("content") if soup.find("meta", property="og:description") else None)
+    m = re.search(r"window\._sharedData\s*=\s*(\{.+?\});</script>", html, flags=re.S)
+    if m:
+        try:
+            data = json.loads(m.group(1))
+            user = data.get("entry_data", {}).get("ProfilePage", [{}])[0]
+            if user:
+                timeline_media = user.get("graphql", {}).get("user", {}).get("edge_owner_to_timeline_media", {}).get("edges", [])
+                if timeline_media:
+                    node = timeline_media[0].get("node", {})
+                    shortcode = node.get("shortcode")
+                    if shortcode:
+                        url = f"https://www.instagram.com/p/{shortcode}/"
+                        caption = node.get("edge_media_to_caption", {}).get("edges", [])
+                        text = caption[0]["node"]["text"] if caption else None
+                        return url, text
+        except Exception:
+            logging.exception("Failed to parse window._sharedData JSON")
+    m = re.search(r"(/p/[A-Za-z0-9_-]+)/", html)
+    if m:
+        url = requests.compat.urljoin(base_url, m.group(1) + "/")
+        return url, None
+    return base_url, None
+
+def extract_latest_from_x(html: str, base_url: str):
+    soup = BeautifulSoup(html, "html.parser")
+    og = soup.find("meta", property="og:url")
+    if og and og.get("content"):
+        content = og["content"]
+        if "/status/" in content or "/statuses/" in content:
+            return content, (soup.find("meta", property="og:description").get("content") if soup.find("meta", property="og:description") else None)
+    m = re.search(r"/(?:[A-Za-z0-9_]+)/status/([0-9]+)", html)
+    if m:
+        username = base_url.rstrip("/").split("/")[-1]
+        url = f"https://x.com/{username}/status/{m.group(1)}"
+        return url, None
+    return base_url, None
+
+EXTRACTORS = {
+    "facebook": extract_latest_from_facebook,
+    "instagram": extract_latest_from_instagram,
+    "x": extract_latest_from_x
+}
+
+def detect_latest(page_key: str, url: str):
+    html = fetch_html(url)
+    if not html:
+        return None, None
+    extractor = EXTRACTORS.get(page_key)
+    if not extractor:
+        return None, None
+    try:
+        return extractor(html, url)
+    except Exception:
+        logging.exception(f"Extractor failed for {page_key} {url}")
+        return None, None
+
+# ---------------- Discord Notification ----------------
 
 def send_discord_notification(webhook_url: str, content: str, username: str = "SocialMonitor") -> bool:
     if not webhook_url or "REPLACE_WITH_YOURS" in webhook_url:
@@ -101,10 +177,10 @@ def main_loop():
                 if ok:
                     last_seen[key] = latest_id
                     save_last_seen(last_seen)
-
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 # ---------------- Flask web service (dummy) ----------------
+
 app = Flask(__name__)
 
 @app.route("/")
@@ -112,7 +188,6 @@ def home():
     return "Social monitor is running!"
 
 if __name__ == "__main__":
-    # نبدأ الثريد الخلفي
     threading.Thread(target=main_loop, daemon=True).start()
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
