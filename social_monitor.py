@@ -1,88 +1,110 @@
-import time
-import random
-import requests
+import requests, time, logging, threading
+from bs4 import BeautifulSoup
 from flask import Flask
-import logging
 
-# إعداد اللوج
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
+# إعداد اللوجات
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger()
 
-# Flask App
-app = Flask(__name__)
-
-# رابط Discord Webhook (بدّله بالرابط بتاعك)
+# رابط Webhook الخاص بـ Discord
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1435043389669376061/VOvGXZs2XUz3-B9WKkd432u8EUVop5AWL3ro8GJJksKrnLqQ9AGfvOUAPON66ZkbjHih"
 
-# المنصات والـ interval لكل واحدة (بالثواني)
-PLATFORMS = {
-    "facebook": {"url": "https://www.facebook.com/csgocasescom/", "interval": 600, "last_checked": 0},
-    "instagram": {"url": "https://www.instagram.com/csgocasescom/", "interval": 1800, "last_checked": 0},  # 30 دقيقة
-    "x": {"url": "https://x.com/csgocasescom", "interval": 600, "last_checked": 0},
+# روابط الصفحات اللي البوت هيتابعها
+PAGES = {
+    "facebook": "https://www.facebook.com/csgocasescom/",
+    "instagram": "https://www.instagram.com/csgocasescom/",
+    "x": "https://x.com/csgocasescom"
 }
 
-# قائمة User-Agents للتبديل العشوائي
-USER_AGENTS = [
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0 Safari/537.36",
-]
+# الفواصل الزمنية (بالثواني)
+CHECK_INTERVALS = {
+    "facebook": 10 * 60,   # 10 دقائق
+    "instagram": 30 * 60,  # 30 دقيقة
+    "x": 10 * 60           # 10 دقائق
+}
 
-# بروكسي اختياري (سيبه None لو مش عايز تستخدمه)
-PROXY = None
-PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
+# تخزين آخر ID منشور شافه البوت
+last_seen = {}
 
+# إعداد Flask (عشان Render ما يوقفوش)
+app = Flask(__name__)
 
-# إرسال إشعار لديسكورد
-def send_discord_message(message):
-    try:
-        payload = {"content": message}
-        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
-    except Exception as e:
-        logging.warning(f"Failed to send Discord message: {e}")
-
-
-# فحص المنصة
-def fetch_platform(platform):
-    now = time.time()
-    info = PLATFORMS[platform]
-
-    # لو لسه ما عداش الوقت المحدد
-    if now - info["last_checked"] < info["interval"]:
-        logging.info(f"⏳ Skipping {platform} (interval not reached)")
-        return
-
-    info["last_checked"] = now
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-
-    try:
-        response = requests.get(info["url"], headers=headers, proxies=PROXIES, timeout=10)
-        response.raise_for_status()
-        logging.info(f"✅ Checked {platform} -> {info['url']}")
-        send_discord_message(f"✅ {platform.capitalize()} check successful: {info['url']}")
-    except requests.exceptions.HTTPError as e:
-        if response.status_code == 429:
-            logging.warning(f"⚠️ 429 Too Many Requests from {info['url']}")
-            send_discord_message(f"⚠️ {platform.capitalize()} returned 429 (rate limit). Will retry later.")
-        else:
-            logging.warning(f"❌ HTTP error for {platform}: {e}")
-            send_discord_message(f"❌ {platform.capitalize()} HTTP error: {e}")
-    except Exception as e:
-        logging.warning(f"❌ Request failed for {platform}: {e}")
-        send_discord_message(f"❌ {platform.capitalize()} failed: {e}")
-
-
-# الصفحة الرئيسية للـ Render
-@app.route("/")
+@app.route('/')
 def home():
-    return "✅ Social Monitor is running and checking pages periodically."
+    return "Bot is running fine!"
 
+# دالة ترسل إشعار إلى Discord
+def send_discord_message(platform, post_url):
+    data = {
+        "content": f"📢 **منشور جديد على {platform.capitalize()}!**\n{post_url}"
+    }
+    try:
+        requests.post(DISCORD_WEBHOOK_URL, json=data)
+        logger.info(f"Sent Discord notification for {platform}")
+    except Exception as e:
+        logger.error(f"Failed to send Discord message: {e}")
 
-# Main loop
-if __name__ == "__main__":
-    logging.info("🚀 Starting social monitor service...")
-    send_discord_message("🟢 Social Monitor started successfully!")
+# دالة تجيب HTML الصفحة
+def fetch_html(url):
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    }
+    r = requests.get(url, headers=headers, timeout=10)
+    r.raise_for_status()
+    return r.text
 
+# دالة تحاول تكتشف أحدث بوست
+def detect_latest(platform, url):
+    try:
+        html = fetch_html(url)
+        soup = BeautifulSoup(html, "html.parser")
+
+        if platform == "facebook":
+            snippet = soup.title.string if soup.title else ""
+        elif platform == "instagram":
+            snippet = soup.find("meta", property="og:title")
+            snippet = snippet["content"] if snippet else ""
+        elif platform == "x":
+            snippet = soup.find("meta", property="og:title")
+            snippet = snippet["content"] if snippet else ""
+        else:
+            snippet = ""
+        return snippet.strip() if snippet else None
+    except Exception as e:
+        logger.warning(f"Could not detect latest for {platform}: {e}")
+        return None
+
+# اللوب الرئيسي
+def main_loop():
     while True:
-        for platform in PLATFORMS:
-            fetch_platform(platform)
-        time.sleep(5)
+        for platform, url in PAGES.items():
+            interval = CHECK_INTERVALS[platform]
+            now = time.time()
+
+            if platform in last_seen and (now - last_seen[platform]["time"]) < interval:
+                logger.info(f"Skipping {platform} (interval not reached)")
+                continue
+
+            logger.info(f"Checking {platform} -> {url}")
+            snippet = detect_latest(platform, url)
+
+            if not snippet:
+                logger.warning(f"Could not detect latest for {platform}")
+            else:
+                prev = last_seen.get(platform, {}).get("snippet")
+                if prev != snippet:
+                    logger.info(f"New post detected for {platform}!")
+                    send_discord_message(platform, url)
+                    last_seen[platform] = {"snippet": snippet, "time": now}
+                else:
+                    logger.info(f"No new posts for {platform}")
+
+            last_seen.setdefault(platform, {"snippet": snippet or "", "time": now})
+        time.sleep(60)
+
+# تشغيل اللوب في thread منفصل
+threading.Thread(target=main_loop, daemon=True).start()
+
+if __name__ == "__main__":
+    logger.info("Starting monitor.")
+    app.run(host="0.0.0.0", port=10000)
