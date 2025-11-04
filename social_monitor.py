@@ -12,9 +12,11 @@ from bs4 import BeautifulSoup
 from flask import Flask
 
 # ---------------- CONFIG -----------------
-CHECK_INTERVAL_SECONDS = 10 * 60  # 10 دقائق
+CHECK_INTERVAL_SECONDS = 10 * 60  # 10 دقائق لباقي الصفحات
+INSTAGRAM_INTERVAL_SECONDS = 20 * 60  # 20 دقيقة لإنستاجرام
 LAST_SEEN_FILE = Path("last_seen.json")
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1435043389669376061/VOvGXZs2XUz3-B9WKkd432u8EUVop5AWL3ro8GJJksKrnLqQ9AGfvOUAPON66ZkbjHih"  # ضع رابطك هنا
+
 PAGES = {
     "facebook": "https://www.facebook.com/csgocasescom/",
     "instagram": "https://www.instagram.com/csgocasescom/",
@@ -26,6 +28,8 @@ USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15",
+    "Mozilla/5.0 (iPad; CPU OS 16_0 like Mac OS X) AppleWebKit/605.1.15"
 ]
 
 # Optional: proxies from env
@@ -71,8 +75,9 @@ def fetch_html(url: str, timeout: int = 20, max_retries: int = 4):
         try:
             r = requests.get(url, headers=headers, timeout=timeout, proxies=proxies)
             if r.status_code == 429:
-                COOLDOWNS[url] = time.time() + 30*60  # 30 دقيقة cooldown
-                logging.warning("Received 429 from %s — setting cooldown 30 minutes", url)
+                # dynamic cooldown: يزيد حسب عدد المحاولات
+                COOLDOWNS[url] = time.time() + min(1800, 60*attempt)  
+                logging.warning("Received 429 from %s — setting cooldown until %s", url, time.ctime(COOLDOWNS[url]))
                 return None
             r.raise_for_status()
             return r.text
@@ -85,7 +90,7 @@ def fetch_html(url: str, timeout: int = 20, max_retries: int = 4):
         backoff *= 2
 
     logging.error("Failed to fetch %s after %s attempts", url, max_retries)
-    COOLDOWNS[url] = time.time() + 5*60  # short cooldown
+    COOLDOWNS[url] = time.time() + 300  # short cooldown
     return None
 
 # ---------------- Extractors ----------------
@@ -188,9 +193,16 @@ def make_message(platform, detected_url, snippet):
 # ---------------- Main Loop ----------------
 def main_loop():
     last_seen = load_last_seen()
-    logging.info("Starting monitor. Will check every %s seconds", CHECK_INTERVAL_SECONDS)
+    logging.info("Starting monitor.")
+    last_checked = {}
     while True:
+        now = time.time()
         for key, url in PAGES.items():
+            interval = INSTAGRAM_INTERVAL_SECONDS if key == "instagram" else CHECK_INTERVAL_SECONDS
+            if last_checked.get(key, 0) + interval > now:
+                logging.info("Skipping %s (interval not reached)", key)
+                continue
+            last_checked[key] = now
             logging.info("Checking %s -> %s", key, url)
             latest_id, snippet = detect_latest(key, url)
             if latest_id is None:
@@ -205,7 +217,7 @@ def main_loop():
                 if send_discord_notification(DISCORD_WEBHOOK_URL, message):
                     last_seen[key] = latest_id
                     save_last_seen(last_seen)
-        time.sleep(CHECK_INTERVAL_SECONDS)
+        time.sleep(5)  # small sleep to prevent tight loop
 
 # ---------------- Flask ----------------
 app = Flask(__name__)
