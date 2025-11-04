@@ -4,6 +4,7 @@ import time
 import logging
 from pathlib import Path
 import threading
+import random
 import os
 
 import requests
@@ -13,21 +14,29 @@ from flask import Flask
 # ---------------- CONFIG -----------------
 CHECK_INTERVAL_SECONDS = 10 * 60  # 10 دقائق
 LAST_SEEN_FILE = Path("last_seen.json")
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-}
-DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/..."  # ضع رابطك هنا
+DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1435043389669376061/VOvGXZs2XUz3-B9WKkd432u8EUVop5AWL3ro8GJJksKrnLqQ9AGfvOUAPON66ZkbjHih"  # ضع رابطك هنا
 PAGES = {
     "facebook": "https://www.facebook.com/csgocasescom/",
     "instagram": "https://www.instagram.com/csgocasescom/",
     "x": "https://x.com/csgocasescom"
 }
-# ------------------------------------------
+
+# Rotate user agents
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36",
+]
+
+# Optional: proxies from env
+PROXIES = [p.strip() for p in os.environ.get("PROXIES", "").split(",") if p.strip()]
+
+# Cooldown dict to avoid hammering 429
+COOLDOWNS = {}  # url -> timestamp
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
 # ---------------- Helper functions ----------------
-
 def load_last_seen() -> dict:
     if LAST_SEEN_FILE.exists():
         try:
@@ -40,33 +49,60 @@ def load_last_seen() -> dict:
 def save_last_seen(data: dict):
     LAST_SEEN_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
 
-def fetch_html(url: str, timeout: int = 20):
-    try:
-        r = requests.get(url, headers=HEADERS, timeout=timeout)
-        r.raise_for_status()
-        return r.text
-    except Exception:
-        logging.exception(f"Failed to fetch {url}")
+# ---------------- Fetch with retries, UA rotation, cooldown ----------------
+def fetch_html(url: str, timeout: int = 20, max_retries: int = 4):
+    now = time.time()
+    if COOLDOWNS.get(url, 0) > now:
+        logging.warning("In cooldown for %s until %s", url, time.ctime(COOLDOWNS[url]))
         return None
 
-# ---------------- Extractors ----------------
+    attempt = 0
+    backoff = 1.0
+    while attempt < max_retries:
+        attempt += 1
+        headers = {
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.google.com/"
+        }
+        proxies = {"http": random.choice(PROXIES), "https": random.choice(PROXIES)} if PROXIES else None
 
-def extract_latest_from_facebook(html: str, base_url: str):
+        try:
+            r = requests.get(url, headers=headers, timeout=timeout, proxies=proxies)
+            if r.status_code == 429:
+                COOLDOWNS[url] = time.time() + 30*60  # 30 دقيقة cooldown
+                logging.warning("Received 429 from %s — setting cooldown 30 minutes", url)
+                return None
+            r.raise_for_status()
+            return r.text
+        except requests.exceptions.RequestException as e:
+            logging.warning("Request failed for %s (attempt %s): %s", url, attempt, e)
+
+        sleep_time = backoff + random.random()*0.5
+        logging.info("Retrying %s in %.1f seconds...", url, sleep_time)
+        time.sleep(sleep_time)
+        backoff *= 2
+
+    logging.error("Failed to fetch %s after %s attempts", url, max_retries)
+    COOLDOWNS[url] = time.time() + 5*60  # short cooldown
+    return None
+
+# ---------------- Extractors ----------------
+def extract_latest_from_facebook(html, base_url):
     soup = BeautifulSoup(html, "html.parser")
     og_url = soup.find("meta", property="og:url")
     if og_url and og_url.get("content"):
         return og_url["content"], (soup.find("meta", property="og:description").get("content") if soup.find("meta", property="og:description") else None)
     m = re.search(r"(/[^\s'\"]+/posts/\d+)", html)
     if m:
-        url = requests.compat.urljoin(base_url, m.group(1))
-        return url, None
+        return requests.compat.urljoin(base_url, m.group(1)), None
     m = re.search(r"story_fbid=([0-9]+)", html)
     if m:
-        url = f"{base_url.rstrip('/')}/posts/{m.group(1)}"
-        return url, None
+        return f"{base_url.rstrip('/')}/posts/{m.group(1)}", None
     return base_url, (soup.title.string if soup.title else None)
 
-def extract_latest_from_instagram(html: str, base_url: str):
+def extract_latest_from_instagram(html, base_url):
     soup = BeautifulSoup(html, "html.parser")
     og = soup.find("meta", property="og:url")
     if og and og.get("content"):
@@ -87,14 +123,13 @@ def extract_latest_from_instagram(html: str, base_url: str):
                         text = caption[0]["node"]["text"] if caption else None
                         return url, text
         except Exception:
-            logging.exception("Failed to parse window._sharedData JSON")
+            logging.exception("Failed to parse Instagram JSON")
     m = re.search(r"(/p/[A-Za-z0-9_-]+)/", html)
     if m:
-        url = requests.compat.urljoin(base_url, m.group(1) + "/")
-        return url, None
+        return requests.compat.urljoin(base_url, m.group(1) + "/"), None
     return base_url, None
 
-def extract_latest_from_x(html: str, base_url: str):
+def extract_latest_from_x(html, base_url):
     soup = BeautifulSoup(html, "html.parser")
     og = soup.find("meta", property="og:url")
     if og and og.get("content"):
@@ -104,8 +139,7 @@ def extract_latest_from_x(html: str, base_url: str):
     m = re.search(r"/(?:[A-Za-z0-9_]+)/status/([0-9]+)", html)
     if m:
         username = base_url.rstrip("/").split("/")[-1]
-        url = f"https://x.com/{username}/status/{m.group(1)}"
-        return url, None
+        return f"https://x.com/{username}/status/{m.group(1)}", None
     return base_url, None
 
 EXTRACTORS = {
@@ -114,7 +148,7 @@ EXTRACTORS = {
     "x": extract_latest_from_x
 }
 
-def detect_latest(page_key: str, url: str):
+def detect_latest(page_key, url):
     html = fetch_html(url)
     if not html:
         return None, None
@@ -127,38 +161,34 @@ def detect_latest(page_key: str, url: str):
         logging.exception(f"Extractor failed for {page_key} {url}")
         return None, None
 
-# ---------------- Discord Notification ----------------
-
-def send_discord_notification(webhook_url: str, content: str, username: str = "SocialMonitor") -> bool:
+# ---------------- Discord ----------------
+def send_discord_notification(webhook_url, content, username="SocialMonitor"):
     if not webhook_url or "REPLACE_WITH_YOURS" in webhook_url:
-        logging.error("Discord webhook URL not set. Edit DISCORD_WEBHOOK_URL in the script.")
+        logging.error("Discord webhook URL not set!")
         return False
-    payload = {"content": content, "username": username}
     try:
-        r = requests.post(webhook_url, json=payload, timeout=10)
+        r = requests.post(webhook_url, json={"content": content, "username": username}, timeout=10)
         r.raise_for_status()
         return True
     except Exception:
         logging.exception("Failed to send Discord notification")
         return False
 
-def make_message(platform: str, detected_url: str, snippet: str) -> str:
+def make_message(platform, detected_url, snippet):
     lines = [f"🔔 New post detected on **{platform}**"]
     if detected_url:
         lines.append(detected_url)
     if snippet:
-        s = snippet.strip().replace("\n", " ")
+        s = snippet.strip().replace("\n"," ")
         if len(s) > 300:
-            s = s[:300] + "..."
+            s = s[:300]+"..."
         lines.append(f"> {s}")
     return "\n".join(lines)
 
-# ---------------- Main background loop ----------------
-
+# ---------------- Main Loop ----------------
 def main_loop():
     last_seen = load_last_seen()
     logging.info("Starting monitor. Will check every %s seconds", CHECK_INTERVAL_SECONDS)
-
     while True:
         for key, url in PAGES.items():
             logging.info("Checking %s -> %s", key, url)
@@ -166,23 +196,19 @@ def main_loop():
             if latest_id is None:
                 logging.warning("Could not detect latest for %s", key)
                 continue
-
             previous = last_seen.get(key)
             if previous is None:
                 last_seen[key] = latest_id
                 save_last_seen(last_seen)
             elif latest_id != previous:
                 message = make_message(key, latest_id, snippet)
-                ok = send_discord_notification(DISCORD_WEBHOOK_URL, message)
-                if ok:
+                if send_discord_notification(DISCORD_WEBHOOK_URL, message):
                     last_seen[key] = latest_id
                     save_last_seen(last_seen)
         time.sleep(CHECK_INTERVAL_SECONDS)
 
-# ---------------- Flask web service (dummy) ----------------
-
+# ---------------- Flask ----------------
 app = Flask(__name__)
-
 @app.route("/")
 def home():
     return "Social monitor is running!"
