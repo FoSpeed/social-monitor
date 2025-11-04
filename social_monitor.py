@@ -122,7 +122,7 @@ def monitor_loop():
                     logging.info(f"New post detected for {name}!")
                     send_discord_notification(
                         name,
-                        f"🔔 **New post detected on {name}!**\n{url}\n{latest_post}",
+                        f"🔔 **New post detected on {name}!**\n@everyone\n{url}\n{latest_post}",
                     )
                     activity_happened = True
                 else:
