@@ -6,6 +6,7 @@ from flask import Flask
 from bs4 import BeautifulSoup
 from datetime import datetime
 import traceback
+import feedparser  # مكتبة قراءة RSS
 
 # إعداد اللوجز
 logging.basicConfig(level=logging.INFO)
@@ -13,21 +14,21 @@ logging.basicConfig(level=logging.INFO)
 # Discord Webhook
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1435043389669376061/VOvGXZs2XUz3-B9WKkd432u8EUVop5AWL3ro8GJJksKrnLqQ9AGfvOUAPON66ZkbjHih"
 
-# الصفحات اللي المراقبة
+# الصفحات المراقبة
 SOURCES = {
     "facebook": {
-        "url": "https://www.facebook.com/csgocasescom/",
+        "url": "https://rss.app/feeds/g9tpSfll19QEJgAR.xml",  # RSS للفيسبوك
         "interval": 15 * 60,  # 15 دقيقة
         "last_post": None,
     },
     "instagram": {
         "url": "https://www.instagram.com/csgocasescom/",
-        "interval": 30 * 60,  # 30 دقيقة
+        "interval": 30 * 60,
         "last_post": None,
     },
     "x": {
         "url": "https://x.com/csgocasescom",
-        "interval": 20 * 60,  # 20 دقيقة
+        "interval": 20 * 60,
         "last_post": None,
     },
 }
@@ -48,11 +49,11 @@ def send_discord_notification(source, message):
     try:
         r = requests.post(DISCORD_WEBHOOK_URL, json=data, timeout=10)
         if r.status_code == 204:
-            logging.info(f"Sent Discord notification for {source}")
+            logging.info(f"✅ Sent Discord notification for {source}")
         else:
-            logging.warning(f"Discord response ({r.status_code}): {r.text}")
+            logging.warning(f"⚠️ Discord response ({r.status_code}): {r.text}")
     except Exception as e:
-        logging.error(f"Failed to send Discord notification: {e}")
+        logging.error(f"❌ Failed to send Discord notification: {e}")
 
 
 def fetch_html(url):
@@ -63,27 +64,28 @@ def fetch_html(url):
     return r.text
 
 
-def detect_latest(source, html):
+def detect_latest(source, data):
     """استخراج آخر بوست أو تحديث"""
-    soup = BeautifulSoup(html, "html.parser")
-
     if source == "facebook":
-        posts = soup.find_all("a", href=True)
-        for p in posts:
-            if "/posts/" in p["href"]:
-                return p["href"]
+        # استخدام RSS بدل HTML
+        feed = feedparser.parse(data["url"])
+        if feed.entries:
+            latest = feed.entries[0].link
+            return latest
 
-    elif source == "instagram":
-        scripts = soup.find_all("script", type="application/ld+json")
-        for script in scripts:
-            if '"@type": "ImageObject"' in script.text:
-                return script.text.strip()[:200]
+    else:
+        html = fetch_html(data["url"])
+        soup = BeautifulSoup(html, "html.parser")
 
-    elif source == "x":
-        links = soup.find_all("a", href=True)
-        for l in links:
-            if "/status/" in l["href"]:
-                return l["href"]
+        if source == "instagram":
+            meta = soup.find("meta", property="og:image")
+            if meta:
+                return meta["content"]
+
+        elif source == "x":
+            links = [a["href"] for a in soup.find_all("a", href=True) if "/status/" in a["href"]]
+            if links:
+                return links[0]
 
     return None
 
@@ -91,7 +93,7 @@ def detect_latest(source, html):
 def monitor_loop():
     """حلقة المراقبة الرئيسية"""
     global last_activity_time
-    logging.info("Starting monitor.")
+    logging.info("🚀 Starting monitor.")
     send_discord_notification(
         "system",
         f"🟢 **Monitor restarted!**\nRender service was redeployed or restarted at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
@@ -108,31 +110,30 @@ def monitor_loop():
                 last_check = data.get("last_check", 0)
 
                 if now - last_check < interval:
-                    logging.info(f"Skipping {name} (interval not reached)")
+                    logging.info(f"⏩ Skipping {name} (interval not reached)")
                     continue
 
-                logging.info(f"Checking {name} -> {url}")
+                logging.info(f"🔎 Checking {name} -> {url}")
                 SOURCES[name]["last_check"] = now
 
-                html = fetch_html(url)
-                latest_post = detect_latest(name, html)
+                latest_post = detect_latest(name, data)
 
                 if latest_post and latest_post != data["last_post"]:
                     SOURCES[name]["last_post"] = latest_post
-                    logging.info(f"New post detected for {name}!")
+                    logging.info(f"📢 New post detected for {name}!")
                     send_discord_notification(
                         name,
                         f"🔔 **New post detected on {name}!**\n@everyone\n{url}\n{latest_post}",
                     )
                     activity_happened = True
                 else:
-                    logging.info(f"No new posts for {name}")
+                    logging.info(f"😴 No new posts for {name}")
 
             # تحديث آخر نشاط
             if activity_happened:
                 last_activity_time = now
 
-            # لو مر أكتر من ساعة من غير أي نشاط أو تحديث
+            # لو مر أكتر من ساعة من غير أي نشاط
             if now - last_activity_time > 3600:
                 send_discord_notification(
                     "system", "🔄 **No updates detected for 1 hour!**\nThe monitor is still running fine."
