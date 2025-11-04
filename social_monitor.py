@@ -1,108 +1,88 @@
 import time
-import logging
+import random
 import requests
-from pathlib import Path
-import json
+from flask import Flask
+import logging
 
-# ---------------- CONFIG -----------------
-CHECK_INTERVAL_SECONDS = {
-    "facebook": 600,    # كل 10 دقائق
-    "instagram": 1200,  # كل 20 دقيقة
-    "x": 600            # كل 10 دقائق
-}
-LAST_SEEN_FILE = Path("last_seen.json")
-HEADERS = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-}
+# إعداد اللوج
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s: %(message)s")
 
-# Discord webhook URL
+# Flask App
+app = Flask(__name__)
+
+# رابط Discord Webhook (بدّله بالرابط بتاعك)
 DISCORD_WEBHOOK_URL = "https://discord.com/api/webhooks/1435043389669376061/VOvGXZs2XUz3-B9WKkd432u8EUVop5AWL3ro8GJJksKrnLqQ9AGfvOUAPON66ZkbjHih"
 
-# الصفحات اللي هنتابعها
-PAGES = {
-    "facebook": "https://www.facebook.com/csgocasescom/",
-    "instagram": "https://www.instagram.com/csgocasescom/",
-    "x": "https://x.com/csgocasescom"
+# المنصات والـ interval لكل واحدة (بالثواني)
+PLATFORMS = {
+    "facebook": {"url": "https://www.facebook.com/csgocasescom/", "interval": 600, "last_checked": 0},
+    "instagram": {"url": "https://www.instagram.com/csgocasescom/", "interval": 1800, "last_checked": 0},  # 30 دقيقة
+    "x": {"url": "https://x.com/csgocasescom", "interval": 600, "last_checked": 0},
 }
-# ------------------------------------------
 
-logging.basicConfig(level=logging.INFO)
+# قائمة User-Agents للتبديل العشوائي
+USER_AGENTS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/112.0 Safari/537.36",
+]
 
-def load_last_seen():
-    if LAST_SEEN_FILE.exists():
-        with open(LAST_SEEN_FILE, "r") as f:
-            return json.load(f)
-    return {}
+# بروكسي اختياري (سيبه None لو مش عايز تستخدمه)
+PROXY = None
+PROXIES = {"http": PROXY, "https": PROXY} if PROXY else None
 
-def save_last_seen(data):
-    with open(LAST_SEEN_FILE, "w") as f:
-        json.dump(data, f)
 
-def fetch_html(url):
+# إرسال إشعار لديسكورد
+def send_discord_message(message):
     try:
-        r = requests.get(url, headers=HEADERS)
-        r.raise_for_status()
-        return r.text
+        payload = {"content": message}
+        requests.post(DISCORD_WEBHOOK_URL, json=payload, timeout=10)
+    except Exception as e:
+        logging.warning(f"Failed to send Discord message: {e}")
+
+
+# فحص المنصة
+def fetch_platform(platform):
+    now = time.time()
+    info = PLATFORMS[platform]
+
+    # لو لسه ما عداش الوقت المحدد
+    if now - info["last_checked"] < info["interval"]:
+        logging.info(f"⏳ Skipping {platform} (interval not reached)")
+        return
+
+    info["last_checked"] = now
+    headers = {"User-Agent": random.choice(USER_AGENTS)}
+
+    try:
+        response = requests.get(info["url"], headers=headers, proxies=PROXIES, timeout=10)
+        response.raise_for_status()
+        logging.info(f"✅ Checked {platform} -> {info['url']}")
+        send_discord_message(f"✅ {platform.capitalize()} check successful: {info['url']}")
     except requests.exceptions.HTTPError as e:
-        logging.warning("Request failed for %s: %s", url, e)
-        return None
+        if response.status_code == 429:
+            logging.warning(f"⚠️ 429 Too Many Requests from {info['url']}")
+            send_discord_message(f"⚠️ {platform.capitalize()} returned 429 (rate limit). Will retry later.")
+        else:
+            logging.warning(f"❌ HTTP error for {platform}: {e}")
+            send_discord_message(f"❌ {platform.capitalize()} HTTP error: {e}")
     except Exception as e:
-        logging.warning("Error fetching %s: %s", url, e)
-        return None
+        logging.warning(f"❌ Request failed for {platform}: {e}")
+        send_discord_message(f"❌ {platform.capitalize()} failed: {e}")
 
-# دالة وهمية لتحديد أحدث بوست (ضع دالتك هنا)
-def detect_latest(platform, url):
-    html = fetch_html(url)
-    if html is None:
-        return None, None
-    # مثال: ترجع id و snippet (لازم تعدل حسب HTML)
-    return "dummy_id", "Latest post snippet"
 
-def make_message(platform, latest_id, snippet):
-    return f"New post on {platform}: {latest_id}\n{snippet}"
+# الصفحة الرئيسية للـ Render
+@app.route("/")
+def home():
+    return "✅ Social Monitor is running and checking pages periodically."
 
-def send_discord_notification(webhook_url, message):
-    try:
-        r = requests.post(webhook_url, json={"content": message})
-        r.raise_for_status()
-        return True
-    except Exception as e:
-        logging.warning("Failed to send Discord message: %s", e)
-        return False
 
-def main_loop():
-    last_seen = load_last_seen()
-    last_checked = {key: 0 for key in PAGES}  # آخر مرة اتعمل فيها فحص لكل منصة
-
-    logging.info("Starting monitor.")
+# Main loop
+if __name__ == "__main__":
+    logging.info("🚀 Starting social monitor service...")
+    send_discord_message("🟢 Social Monitor started successfully!")
 
     while True:
-        now = time.time()
-        for key, url in PAGES.items():
-            interval = CHECK_INTERVAL_SECONDS.get(key, 600)
-            if now - last_checked[key] < interval:
-                logging.info("Skipping %s (interval not reached)", key)
-                continue
-
-            logging.info("Checking %s -> %s", key, url)
-            latest_id, snippet = detect_latest(key, url)
-            last_checked[key] = now
-
-            if latest_id is None:
-                logging.warning("Could not detect latest for %s", key)
-                continue
-
-            previous = last_seen.get(key)
-            if previous is None:
-                last_seen[key] = latest_id
-                save_last_seen(last_seen)
-            elif latest_id != previous:
-                message = make_message(key, latest_id, snippet)
-                ok = send_discord_notification(DISCORD_WEBHOOK_URL, message)
-                if ok:
-                    last_seen[key] = latest_id
-                    save_last_seen(last_seen)
-        time.sleep(5)  # منع اللوب من الدوران بسرعة كبيرة
-
-if __name__ == "__main__":
-    main_loop()
+        for platform in PLATFORMS:
+            fetch_platform(platform)
+        time.sleep(5)
